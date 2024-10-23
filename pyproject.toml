@@ -1,0 +1,38 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+requires-python = ">=3.10"
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "flowercare_exporter"
+authors = [{name = "Jürgen Hötzel", email = "juergen@hoetzel.info"}]
+license = {file = "LICENSE"}
+classifiers = ["License :: OSI Approved :: MIT License"]
+dynamic = ["version", "description"]
+dependencies = ["PyGObject", "prometheus-client"]
+
+[project.urls]
+Home = "https://github.com/juergenhoetzel/flowercare_exporter"
+
+[project.optional-dependencies]
+dev = [
+    "pyright",
+    "ruff",
+    "PyGObject-stubs"]
+
+[project.scripts]
+flowercare_exporter = "flowercare_exporter.main:main"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+[tool.ruff]
+target-version = "py310"
+line-length = 120
