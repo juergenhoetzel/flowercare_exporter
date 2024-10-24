@@ -28,7 +28,7 @@ jobs:
           pip install flit
       - name: Package artifacts
         run: flit build
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           path: ./dist/*
   publish:
