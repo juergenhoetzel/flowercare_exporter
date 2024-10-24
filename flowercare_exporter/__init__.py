@@ -1,3 +1,3 @@
 """Export Miflora sensor data  using Bluetooth Prometheus"""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
