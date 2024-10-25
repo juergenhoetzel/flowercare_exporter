@@ -26,7 +26,6 @@ def _get_alias_mapping(args: argparse.Namespace) -> dict[str, str]:
 
 
 def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
-    mifloramanager = MiFloraManager(_get_alias_mapping(args))
     metrics_received: set[str] = set()  # set of macs
     exporters: list[Exporter] = []
 
@@ -69,18 +68,25 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
             GLib.timeout_add_seconds(5, partial(_concurrent_connect, miflora, retry=retry))
         return False  # no auto recall
 
-    def miflora_added(__manager__, miflora: MiFlora):
+    def miflora_added(miflora: MiFlora):
+        log.debug(f"Added {miflora}")
         if miflora.address in metrics_received:
             log.info(f"Not connecting to {miflora.address} (metric already collected)")
         else:
             miflora.on_services_disovered = get_metrics
             _concurrent_connect(miflora)
 
+    def miflora_removed(miflora: MiFlora):
+        log.debug(f"Removed {miflora}")
+        if miflora.address in _connect_device:
+            _connect_device.remove(miflora.address)
+            _connect_lock.release()  # We can safely unlock and allow still present devices to connect
+
     def quit():
         log.info(f"Received Data from {len(metrics_received)} MiFloras")
         mainloop.quit()
 
-    mifloramanager.on_miflora_added = miflora_added
+    mifloramanager = MiFloraManager(_get_alias_mapping(args), miflora_added, miflora_removed)
     mifloramanager.setup_adapter()  # trigger events
     mifloramanager.start_discovery()
     GLib.timeout_add_seconds(args.timeout, quit)
@@ -89,12 +95,13 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
 def blink(mainloop: GLib.MainLoop, args: argparse.Namespace):
     alias_mapping = _get_alias_mapping(args)
 
-    def miflora_added(__manager__, miflora: MiFlora):
+    def miflora_added(miflora: MiFlora):
         miflora.on_services_disovered = MiFlora.blink
         miflora.connect(lambda miflora: log.error(f"Failed to connect to {miflora.address}"))
 
-    mifloramanager = MiFloraManager(alias_mapping)
-    mifloramanager.on_miflora_added = miflora_added
+    mifloramanager = MiFloraManager(
+        alias_mapping, miflora_added, lambda miflora: log.debug(f"MiFlora {miflora} removed")
+    )
     mifloramanager.setup_adapter()  # trigger events
 
 

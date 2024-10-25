@@ -133,14 +133,8 @@ class MiFlora:
         )
 
 
-# default handlers
-def _log_added_miflora(_mifloramanger, miflora):
-    log.debug(f"Miflora added: {miflora}")
-
-
 class MiFloraManager:
     mifloras: dict[str, MiFlora] = dict()
-    on_miflora_added: Callable[["MiFloraManager", MiFlora], None] = _log_added_miflora
 
     def _get_matching_miflora(self, dbus_object) -> MiFlora | None:
         found_list = [
@@ -151,9 +145,12 @@ class MiFloraManager:
         if found_list:
             return found_list[0]
 
-    def __init__(self, alias_mapping: dict[str, str]):
+    def __init__(
+        self, alias_mapping: dict[str, str], added_cb: Callable[[MiFlora], None], removed_cb: Callable[[MiFlora], None]
+    ):
         self.alias_mapping = alias_mapping
-
+        self._added_cb = added_cb
+        self._removed_cb = removed_cb
         self._bluez_object_manager = Gio.DBusObjectManagerClient.new_for_bus_sync(
             Gio.BusType.SYSTEM, Gio.DBusObjectManagerClientFlags.DO_NOT_AUTO_START, "org.bluez", "/", None, None, None
         )
@@ -201,16 +198,16 @@ class MiFloraManager:
         # result_handler=log_gerror_handler("StartDiscovery failed")
 
     def stop_discovery(self, stopped_cb: Callable[[], None]):
-        """Stop Disovery ignoring errors"""
+        """Async stop Discovery, ignoring all errors"""
         assert self._adapter_proxy
         self._adapter_proxy.StopDiscovery(  # type: ignore
             result_handler=lambda *args: stopped_cb()
         )
 
-    def _object_removed(self, _client, dbus_object: Gio.DBusObject):
+    def _object_removed(self, __client__, dbus_object: Gio.DBusObject):
         object_path = dbus_object.get_object_path()
-        if object_path in self.mifloras:
-            log.info(f"{object_path} removed")
+        if miflora := self.mifloras.get("object_path"):
+            self._removed_cb(miflora)
             del self.mifloras[object_path]
 
     def _gatt_handler(self, dbus_object):
@@ -251,8 +248,7 @@ class MiFloraManager:
                 self.mifloras[object_path] = MiFlora(object_path, alias, address, rssi)
                 miflora._device_proxy = device_proxy
                 self.mifloras[object_path] = miflora
-                log.debug(f"New Device {miflora}")
-                self.on_miflora_added(self, miflora)
+                self._added_cb(miflora)
 
         elif dbus_object.get_interface("org.bluez.GattCharacteristic1"):
             self._gatt_handler(dbus_object)
