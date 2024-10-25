@@ -57,13 +57,21 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
         miflora.read_firmware_battery(_firmware_battery_received)
 
     def _concurrent_connect(miflora: MiFlora, retry=3):
+        def connect_failed(miflora: MiFlora):
+            _connect_lock.release()
+            if retry:
+                _concurrent_connect(miflora, retry - 1)
+            else:
+                log.warning(f"All connect retries to {miflora} failed")
+                _connect_device.remove(miflora.address)
+
         if _connect_lock.acquire(blocking=False):
             log.debug(f"Starting connection to  {miflora.address} (retry={retry}).")
             _connect_device.add(miflora.address)
-            miflora.connect(lambda miflora: _concurrent_connect(miflora, retry=retry - 1))
-        elif retry:
+            miflora.connect(connect_failed)
+        else:
             log.warning(
-                f"Connection(s) to {','.join(_connect_device)} in progress, sleeping for 5 seconds before connecting  to {miflora.address}"
+                f"Connection(s) to {','.join(_connect_device)} in progress, sleeping for 5 before retry {miflora}"
             )
             GLib.timeout_add_seconds(5, partial(_concurrent_connect, miflora, retry=retry))
         return False  # no auto recall
