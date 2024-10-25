@@ -8,7 +8,8 @@ name = "flowercare_exporter"
 authors = [{name = "Jürgen Hötzel", email = "juergen@hoetzel.info"}]
 license = {file = "LICENSE"}
 classifiers = ["License :: OSI Approved :: MIT License"]
-dynamic = ["version", "description"]
+description = "Export Miflora Bluetooth LE sensor to Graphite and Prometheus"
+dynamic = ["version"]
 dependencies = ["PyGObject", "prometheus-client"]
 
 [project.urls]
