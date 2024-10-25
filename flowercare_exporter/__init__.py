@@ -1,3 +1,3 @@
 """Export Miflora Bluetooth LE sensor to Graphite and Prometheus"""
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
