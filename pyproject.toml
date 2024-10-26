@@ -9,7 +9,7 @@ authors = [{name = "Jürgen Hötzel", email = "juergen@hoetzel.info"}]
 license = {file = "LICENSE"}
 classifiers = ["License :: OSI Approved :: MIT License"]
 dynamic = ["version", "description"]
-dependencies = ["PyGObject", "prometheus-client"]
+dependencies = ["PyGObject"]
 readme = "README.md"
 [project.urls]
 Home = "https://github.com/juergenhoetzel/flowercare_exporter"
