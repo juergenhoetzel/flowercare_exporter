@@ -3,8 +3,6 @@ import dataclasses
 import logging
 import os
 import sys
-from functools import partial
-from threading import Lock
 
 import gi
 from gi.repository import GLib  # type: ignore
@@ -29,9 +27,6 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
     metrics_received: set[str] = set()  # set of macs
     exporters: list[Exporter] = []
 
-    _connect_lock = Lock()  # prevent concurrent connections
-    _connect_device: set[str] = set()  # current device macs we are connecting to
-
     if args.graphite_url:
         exporters.append(Graphite(args.graphite_url, os.getenv("METRICS_USER"), os.getenv("METRICS_PASSWORD")))
 
@@ -41,8 +36,6 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
     def _sensor_received(miflora: MiFlora, sensordata: MiFloraSensor):
         print(dataclasses.asdict(sensordata))
         miflora.disconnect()  # all data received
-        _connect_device.remove(miflora.address)
-        _connect_lock.release()  # allow next connection
         metrics_received.add(miflora.address)
         for exporter in exporters:
             exporter.send_sensor(sensordata)
@@ -56,45 +49,19 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
     def get_metrics(miflora: MiFlora):
         miflora.read_firmware_battery(_firmware_battery_received)
 
-    def _concurrent_connect(miflora: MiFlora, retry=3):
-        def connect_failed(miflora: MiFlora):
-            _connect_lock.release()
-            if retry:
-                _concurrent_connect(miflora, retry - 1)
-            else:
-                log.warning(f"All connect retries to {miflora} failed")
-                _connect_device.remove(miflora.address)
-
-        if _connect_lock.acquire(blocking=False):
-            log.debug(f"Starting connection to  {miflora.address} (retry={retry}).")
-            _connect_device.add(miflora.address)
-            miflora.connect(connect_failed)
-        else:
-            log.warning(
-                f"Connection(s) to {','.join(_connect_device)} in progress, sleeping for 5 before retry {miflora}"
-            )
-            GLib.timeout_add_seconds(5, partial(_concurrent_connect, miflora, retry=retry))
-        return False  # no auto recall
-
     def miflora_added(miflora: MiFlora):
         log.debug(f"Added {miflora}")
         if miflora.address in metrics_received:
             log.info(f"Not connecting to {miflora.address} (metric already collected)")
         else:
             miflora.on_services_disovered = get_metrics
-            _concurrent_connect(miflora)
-
-    def miflora_removed(miflora: MiFlora):
-        log.debug(f"Removed {miflora}")
-        if miflora.address in _connect_device:
-            _connect_device.remove(miflora.address)
-            _connect_lock.release()  # We can safely unlock and allow still present devices to connect
+            miflora.connect()
 
     def quit():
         log.info(f"Received Data from {len(metrics_received)} MiFloras")
         mainloop.quit()
 
-    mifloramanager = MiFloraManager(_get_alias_mapping(args), miflora_added, miflora_removed)
+    mifloramanager = MiFloraManager(_get_alias_mapping(args), miflora_added)
     mifloramanager.setup_adapter()  # trigger events
     mifloramanager.start_discovery()
     GLib.timeout_add_seconds(args.timeout, quit)
@@ -105,7 +72,7 @@ def blink(mainloop: GLib.MainLoop, args: argparse.Namespace):
 
     def miflora_added(miflora: MiFlora):
         miflora.on_services_disovered = MiFlora.blink
-        miflora.connect(lambda miflora: log.error(f"Failed to connect to {miflora.address}"))
+        miflora.connect()
 
     mifloramanager = MiFloraManager(
         alias_mapping, miflora_added, lambda miflora: log.debug(f"MiFlora {miflora} removed")

@@ -1,4 +1,5 @@
 import logging
+from threading import Lock
 from typing import Any, Callable
 
 import gi
@@ -28,6 +29,8 @@ def _error_handler(prefix: str):
 
 class MiFlora:
     # internal
+    _connect_lock = Lock()  # prevent concurrent connections
+    _connect_device: str | None = None  # current connect device mac for debugging
     _device_proxy: Gio.DBusInterface
     _firmware_battery_proxy: Gio.DBusInterface
     _device_mode_proxy: Gio.DBusInterface
@@ -45,23 +48,38 @@ class MiFlora:
         self.address = address
         self.rssi = rssi
 
-    def connect(self, on_connect_failed: Callable[["MiFlora"], Any]):
+    def connect(self):
         "Connect async to the device"
 
-        def connect_cb(_obj, _result, _real_user_data):
-            log.info(f"{self.alias} connected")
+        def connect_failed_cb(*args):
+            if MiFlora._connect_device == self.address:  # Device might be vanished meanwhile
+                MiFlora._connect_lock.release()
+                MiFlora._connect_device = ""
+            log_gerror_handler(f" Connect {self}")(*args)
 
-        def connect_failed_cb(obj, error, _real_user_data):
-            if not "Operation already in progress" in error.message:
-                on_connect_failed(self)  # FIXME: Use lambda
-            else:
-                log.error(f"Async connect error: {error.message} to device {self.address}")
-
-        self._device_proxy.Connect(result_handler=connect_cb, error_handler=connect_failed_cb)  # type: ignore
+        if MiFlora._connect_lock.acquire(blocking=False):
+            log.debug(f"Starting connection to  {self}")
+            MiFlora._connect_device = self.address
+            self._device_proxy.Connect(
+                result_handler=lambda *__args__: log.info(f"{self} connected"),
+                error_handler=connect_failed_cb,
+                timeout=20 * 1000,  # FIXME: Hardcoded 20 seconds
+            )  # type: ignore
+        else:
+            log.warning(
+                f"Connection to {MiFlora._connect_device} in progress, waiting for 5 before retry connect to {self}"
+            )
+            GLib.timeout_add_seconds(5, self.connect)
+        return False  # FIXME: Just use timeout_add_once?
 
     def disconnect(self):
+        def disconnected(*__args__):
+            log.debug(f"Disconnected {self.alias}, Releasing lock")
+            MiFlora._connect_lock.release()
+            MiFlora._connect_device = None
+
         self._device_proxy.Disconnect(  # type: ignore
-            result_handler=lambda _obj, _res, _user: log.debug(f"Disconnected {self.alias}"),
+            result_handler=disconnected,
             error_handler=_error_handler("Disconnect"),
         )
 
@@ -146,7 +164,10 @@ class MiFloraManager:
             return found_list[0]
 
     def __init__(
-        self, alias_mapping: dict[str, str], added_cb: Callable[[MiFlora], None], removed_cb: Callable[[MiFlora], None]
+        self,
+        alias_mapping: dict[str, str],
+        added_cb: Callable[[MiFlora], None],
+        removed_cb: Callable[[MiFlora], None] = lambda miflora: log.debug(f"{miflora} vanished"),
     ):
         self.alias_mapping = alias_mapping
         self._added_cb = added_cb
@@ -207,6 +228,10 @@ class MiFloraManager:
     def _object_removed(self, __client__, dbus_object: Gio.DBusObject):
         object_path = dbus_object.get_object_path()
         if miflora := self.mifloras.get("object_path"):
+            if miflora._connect_device == miflora.address:
+                log.debug(f"{miflora} vanished: Releasing lock (connect will never succeed)")
+                MiFlora._connect_device = None
+                MiFlora._connect_lock.release()
             self._removed_cb(miflora)
             del self.mifloras[object_path]
 
