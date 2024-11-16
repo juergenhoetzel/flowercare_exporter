@@ -1,6 +1,6 @@
+import asyncio
 import logging
-from threading import Lock
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 import gi
 
@@ -19,7 +19,6 @@ def log_gerror_handler(log_message: str):
 
 MIFLORA_UUID = "0000fe95-0000-1000-8000-00805f9b34fb"  # FIXME: Duplicated
 MIFLORA_SERVICE_HISTORY_UUID = "00001206-0000-1000-8000-00805f9b34fb"  # unused
-
 log = logging.getLogger(__name__)
 
 
@@ -29,8 +28,7 @@ def _error_handler(prefix: str):
 
 class MiFlora:
     # internal
-    _connect_lock = Lock()  # prevent concurrent connections
-    _connect_device: str | None = None  # current connect device mac for debugging
+    _connect_lock = asyncio.Lock()  # prevent concurrent connections
     _device_proxy: Gio.DBusInterface
     _firmware_battery_proxy: Gio.DBusInterface
     _device_mode_proxy: Gio.DBusInterface
@@ -47,108 +45,101 @@ class MiFlora:
         self.alias = alias
         self.address = address
         self.rssi = rssi
+        self._services_discovered = False
 
-    def connect(self):
+    async def connect(self) -> bool:
         "Connect async to the device"
-
-        def connect_failed_cb(*args):
-            if MiFlora._connect_device == self.address:  # Device might be vanished meanwhile
-                MiFlora._connect_lock.release()
-                MiFlora._connect_device = ""
-            log_gerror_handler(f" Connect {self}")(*args)
-
-        if MiFlora._connect_lock.acquire(blocking=False):
-            log.debug(f"Starting connection to  {self}")
-            MiFlora._connect_device = self.address
-            self._device_proxy.Connect(
-                result_handler=lambda *__args__: log.info(f"{self} connected"),
-                error_handler=connect_failed_cb,
-                timeout=20 * 1000,  # FIXME: Hardcoded 20 seconds
-            )  # type: ignore
-        else:
-            log.warning(
-                f"Connection to {MiFlora._connect_device} in progress, waiting for 5 before retry connect to {self}"
-            )
-            GLib.timeout_add_seconds(5, self.connect)
-        return False  # FIXME: Just use timeout_add_once?
-
-    def disconnect(self):
-        def disconnected(*__args__):
-            log.debug(f"Disconnected {self.alias}, Releasing lock")
-            MiFlora._connect_lock.release()
-            MiFlora._connect_device = None
-
-        self._device_proxy.Disconnect(  # type: ignore
-            result_handler=disconnected,
-            error_handler=_error_handler("Disconnect"),
-        )
-
-    def blink(self):
-        log.info(f"About to blink: {self.alias}")
-        self._device_mode_proxy.WriteValue(  # type: ignore
-            "(aya{sv})",
-            b"\xfd\xff",
-            dict(),
-            result_handler=lambda object, _result, _userdata: log.debug("Blinked!"),
-            error_handler=_error_handler("Blink"),
-        )
-
-    def read_firmware_battery(
-        self,
-        callback: Callable[["MiFlora", MiFloraFirmwareBattery], None] = lambda _, fb: log.debug(f"Got {fb}"),
-    ):
-        def _firmware_battery_callback(val):
-            batt = val[0]
-            firmware = bytes(val[2:]).decode()
-            callback(self, MiFloraFirmwareBattery(batt, firmware, self.alias, self.address, self.rssi))
-
-        self._firmware_battery_proxy.ReadValue(  # type: ignore
-            "(a{sv})",
-            dict(),
-            result_handler=lambda _obj, val, _userdata: _firmware_battery_callback(val),
-            error_handler=_error_handler("Firmware battery read value"),
-        )
-
-    def read_sensor(
-        self,
-        callback: Callable[["MiFlora", MiFloraSensor], None] = lambda _, sensor_data: log.debug(f"{sensor_data}"),
-    ):
-        def _sensor_read_callback(val):
-            log.debug(f"Got bytes from {self.alias} real time data: {bytes(val).hex()} ")
-            if len(val) == 16:
-                temp_celsius = int.from_bytes(val[0:2], byteorder="little") / 10
-                brightness_lux = int.from_bytes(val[3:7], byteorder="little")
-                moisture_percent = val[7]
-                soil_conductivity_µS_cm = int.from_bytes(val[8:10], byteorder="little")
-                sensor_data = MiFloraSensor(
-                    temp_celsius,
-                    brightness_lux,
-                    soil_conductivity_μS_cm,
-                    moisture_percent,
-                    self.alias,
-                    self.address,
-                    self.rssi,
+        async with MiFlora._connect_lock:
+            try:
+                log.debug(f"Starting connection to  {self}")
+                await self._device_proxy.call(
+                    "Connect",
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    -1,
                 )
-                callback(self, sensor_data)
-            else:
-                raise ValueError(f"Invalid data length {len(val)} read from {self.alias}: {bytes(val).hex()}")
+                return True
+            except GLib.Error as err:
+                log.warning(f"Failed to connect to {self}: {err}")
+            return False
 
-        def _data_mode_changed_callback():
-            log.info(f"Changing to real time data mode: {self.alias}")
-            self._sensor_proxy.ReadValue(  # type: ignore
-                "(a{sv})",
-                dict(),
-                result_handler=lambda _obj, result, _userdata: _sensor_read_callback(result),
-                error_handler=_error_handler("Sensor read value"),
-            )
-
-        self._device_mode_proxy.WriteValue(  # type: ignore
-            "(aya{sv})",
-            b"\xa0\x1f",
-            dict(),
-            result_handler=lambda _obj, _result, _userdata: _data_mode_changed_callback(),
-            error_handler=_error_handler("Changing Sensor mode"),
+    async def disconnect(self):
+        await self._device_proxy.call(
+            "Disconnect",  # type: ignore
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
         )
+
+    async def blink(self):
+        self._device_mode_proxy.call(  # type: ignore
+            "WriteValue",
+            GLib.Variant(
+                "(aya{sv})",
+                (
+                    b"\xfd\xff",
+                    {},
+                ),
+            ),
+            Gio.DBusCallFlags.NONE,
+            -1,
+        )
+
+    async def read_firmware_battery(
+        self,
+    ):
+        val = (
+            await self._firmware_battery_proxy.call(
+                "ReadValue",  # type: ignore
+                GLib.Variant("(a{sv})", ({},)),
+                Gio.DBusCallFlags.NONE,
+                -1,
+            )
+        ).unpack()[0]
+        batt = val[0]
+        firmware = bytes(val[2:]).decode()
+        return MiFloraFirmwareBattery(batt, firmware, self.alias, self.address, self.rssi)
+
+    async def read_sensor(self) -> MiFloraSensor:
+        await self._device_mode_proxy.call(
+            "WriteValue",  # type: ignore
+            GLib.Variant(
+                "(aya{sv})",
+                (
+                    b"\xa0\x1f",
+                    dict(),
+                ),
+            ),
+            Gio.DBusCallFlags.NONE,
+            -1,
+        )
+        log.info(f"Changed to real time data mode: {self.alias}")
+        val = (
+            await self._sensor_proxy.call(
+                "ReadValue",  # type: ignore
+                GLib.Variant("(a{sv})", (dict(),)),
+                Gio.DBusCallFlags.NONE,
+                -1,
+            )
+        ).unpack()[0]
+
+        log.debug(f"Got bytes from {self.alias} real time data: {bytes(val).hex()} ")
+        if len(val) == 16:
+            temp_celsius = int.from_bytes(val[0:2], byteorder="little") / 10
+            brightness_lux = int.from_bytes(val[3:7], byteorder="little")
+            moisture_percent = val[7]
+            soil_conductivity_µS_cm = int.from_bytes(val[8:10], byteorder="little")
+            return MiFloraSensor(
+                temp_celsius,
+                brightness_lux,
+                soil_conductivity_μS_cm,
+                moisture_percent,
+                self.alias,
+                self.address,
+                self.rssi,
+            )
+        else:
+            raise ValueError(f"Invalid data length {len(val)} read from {self.alias}: {bytes(val).hex()}")
 
 
 class MiFloraManager:
@@ -166,20 +157,17 @@ class MiFloraManager:
     def __init__(
         self,
         alias_mapping: dict[str, str],
-        added_cb: Callable[[MiFlora], None],
         removed_cb: Callable[[MiFlora], None] = lambda miflora: log.debug(f"{miflora} vanished"),
     ):
         self.alias_mapping = alias_mapping
-        self._added_cb = added_cb
         self._removed_cb = removed_cb
         self._bluez_object_manager = Gio.DBusObjectManagerClient.new_for_bus_sync(
             Gio.BusType.SYSTEM, Gio.DBusObjectManagerClientFlags.DO_NOT_AUTO_START, "org.bluez", "/", None, None, None
         )
-        self._bluez_object_manager.connect("object-added", self._object_added)
         self._bluez_object_manager.connect("interface-proxy-properties-changed", self._properties_changed)
         self._bluez_object_manager.connect("object-removed", self._object_removed)
 
-    def setup_adapter(self):
+    async def setup_adapter(self):
         adapters = [
             object for object in self._bluez_object_manager.get_objects() if object.get_interface("org.bluez.Adapter1")
         ]
@@ -196,42 +184,70 @@ class MiFloraManager:
         )
         log.debug(f"Using adapter {adapter.get_object_path()}")
         # Turn on MiFlora scanning
-        adapter_proxy.SetDiscoveryFilter(  # type: ignore
-            "(a{sv})", {"UUIDs": GLib.Variant("as", [MIFLORA_UUID]), "Pattern": GLib.Variant.new_string("C4:7C:8D")}
-        )  # type: ignore
+        try:
+            await adapter_proxy.call(  # type: ignore
+                "SetDiscoveryFilter",
+                GLib.Variant(
+                    "(a{sv})",
+                    ({"UUIDs": GLib.Variant("as", [MIFLORA_UUID]), "Pattern": GLib.Variant.new_string("C4:7C:8D")},),
+                ),
+                Gio.DBusCallFlags.NONE,
+                -1,
+            )
+        except GLib.Error as err:
+            raise RuntimeError(f"Failed to SetDiscoveryFilter: {err}")
         self._adapter_proxy = adapter_proxy
         self._adapter_props_proxy = adapter.get_interface("org.freedesktop.DBus.Properties")
-        self.start_discovery()
+        await self.set_discovery()
 
-    def start_discovery(self):
-        assert self._adapter_proxy
+    async def scan_mifloras(self) -> AsyncIterator[MiFlora]:
+        queue = asyncio.Queue()
 
-        def error_handler(_obj, error: GLib.Error, _userdata):
-            if not (
-                Gio.DBusError.is_remote_error(error)
-                and Gio.DBusError.get_remote_error(error) == "org.bluez.Error.InProgress"
+        def _object_added(__ignored_client__, dbus_object: Gio.DBusObject):
+            object_path = dbus_object.get_object_path()
+            if (
+                dbus_object.get_interface("org.bluez.Device1")
+                and (props_proxy := dbus_object.get_interface("org.freedesktop.DBus.Properties"))
+                and (device_proxy := dbus_object.get_interface("org.bluez.Device1"))
             ):
-                log.warn(f"Error: {error.message}")
+                uuids = props_proxy.Get(  # type: ignore
+                    "(ss)",
+                    "org.bluez.Device1",
+                    "UUIDs",
+                )
 
-        self._adapter_proxy.StartDiscovery(  # type: ignore
-            error_handler=error_handler, result_handler=lambda *args: log.debug("Scan enabled")
-        )
-        # result_handler=log_gerror_handler("StartDiscovery failed")
+                if MIFLORA_UUID in uuids:
+                    address = props_proxy.Get("(ss)", "org.bluez.Device1", "Address")  # type: ignore
+                    log.info(f"Miflora found :{address}")
+                    if alias := self.alias_mapping.get(address):
+                        props_proxy.Set("(ssv)", "org.bluez.Device1", "Alias", GLib.Variant.new_string(alias))  # type: ignore
+                    else:
+                        alias = props_proxy.Get("(ss)", "org.bluez.Device1", "Alias")  # type: ignore
+                    rssi = props_proxy.Get("(ss)", "org.bluez.Device1", "RSSI")  # type: ignore
+                    miflora = MiFlora(object_path, alias, address, rssi)
+                    self.mifloras[object_path] = MiFlora(object_path, alias, address, rssi)
+                    miflora._device_proxy = device_proxy
+                    self.mifloras[object_path] = miflora
+                    queue.put_nowait(miflora)
+            elif dbus_object.get_interface("org.bluez.GattCharacteristic1"):
+                self._gatt_handler(dbus_object)
 
-    def stop_discovery(self, stopped_cb: Callable[[], None]):
-        """Async stop Discovery, ignoring all errors"""
-        assert self._adapter_proxy
-        self._adapter_proxy.StopDiscovery(  # type: ignore
-            result_handler=lambda *args: stopped_cb()
-        )
+        self._bluez_object_manager.connect("object-added", _object_added)
+        while miflora := await queue.get():
+            yield miflora
+
+    async def set_discovery(self, on=True) -> bool:
+        method = "StartDiscovery" if on else "StopDiscovery"
+        try:
+            await self._adapter_proxy.call(method, None, Gio.DBusCallFlags.NO_AUTO_START, 500)  # type: ignore
+            return True
+        except GLib.Error as error:
+            log.warning(f"{method}: {error.message}")
+        return False
 
     def _object_removed(self, __client__, dbus_object: Gio.DBusObject):
         object_path = dbus_object.get_object_path()
         if miflora := self.mifloras.get("object_path"):
-            if miflora._connect_device == miflora.address:
-                log.debug(f"{miflora} vanished: Releasing lock (connect will never succeed)")
-                MiFlora._connect_device = None
-                MiFlora._connect_lock.release()
             self._removed_cb(miflora)
             del self.mifloras[object_path]
 
@@ -248,36 +264,6 @@ class MiFloraManager:
                 case "00001a01-0000-1000-8000-00805f9b34fb":  # SENSORS
                     miflora._sensor_proxy = gatt_char_proxy
 
-    def _object_added(self, _ignored_client, dbus_object: Gio.DBusObject):
-        object_path = dbus_object.get_object_path()
-        if (
-            dbus_object.get_interface("org.bluez.Device1")
-            and (props_proxy := dbus_object.get_interface("org.freedesktop.DBus.Properties"))
-            and (device_proxy := dbus_object.get_interface("org.bluez.Device1"))
-        ):
-            uuids = props_proxy.Get(  # type: ignore
-                "(ss)",
-                "org.bluez.Device1",
-                "UUIDs",
-            )
-
-            if MIFLORA_UUID in uuids:
-                address = props_proxy.Get("(ss)", "org.bluez.Device1", "Address")  # type: ignore
-                log.info(f"Miflora found :{address}")
-                if alias := self.alias_mapping.get(address):
-                    props_proxy.Set("(ssv)", "org.bluez.Device1", "Alias", GLib.Variant.new_string(alias))  # type: ignore
-                else:
-                    alias = props_proxy.Get("(ss)", "org.bluez.Device1", "Alias")  # type: ignore
-                rssi = props_proxy.Get("(ss)", "org.bluez.Device1", "RSSI")  # type: ignore
-                miflora = MiFlora(object_path, alias, address, rssi)
-                self.mifloras[object_path] = MiFlora(object_path, alias, address, rssi)
-                miflora._device_proxy = device_proxy
-                self.mifloras[object_path] = miflora
-                self._added_cb(miflora)
-
-        elif dbus_object.get_interface("org.bluez.GattCharacteristic1"):
-            self._gatt_handler(dbus_object)
-
     def _properties_changed(
         self,
         _client,
@@ -292,7 +278,7 @@ class MiFloraManager:
         if miflora := self._get_matching_miflora(dbus_object):
             if changed_properties.get("ServicesResolved"):
                 log.debug(f"Services discovered: {object_path}, changed properties {changed_properties}")
-                miflora.on_services_disovered(miflora)
+                miflora._services_discovered = True  # FIXME: Use condition variable?
         elif MIFLORA_UUID in changed_properties.get("ServiceData", {}):
             log.debug(
                 f"Removing already discovered MiFlora {object_path} (previous session?), to rediscover services"

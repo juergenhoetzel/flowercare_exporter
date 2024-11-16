@@ -64,15 +64,15 @@ class Graphite:
             logger = Soup.Logger.new(Soup.LoggerLogLevel.BODY)
             self._session.add_feature(logger)
 
-    def send_battery(self, fb: MiFloraFirmwareBattery):
+    async def send_battery(self, fb: MiFloraFirmwareBattery):
         body = json.dumps(_firmware_battery_to_graphite(fb))
-        self._send_message(body)
+        await self._send_message(body)
 
-    def send_sensor(self, sensordata: MiFloraSensor):
+    async def send_sensor(self, sensordata: MiFloraSensor):
         body = json.dumps(_sensor_to_to_graphite(sensordata))
-        self._send_message(body)
+        await self._send_message(body)
 
-    def _send_message(self, body: str):
+    async def _send_message(self, body: str):
         uri = GLib.Uri.parse(self.url, GLib.UriFlags.NONE)
         message = Soup.Message.new_from_uri("POST", uri)
         if self.user and self.password:
@@ -85,16 +85,10 @@ class Graphite:
             auth_manager.use_auth(message.get_uri(), auth)  # type: ignore
 
         message.set_request_body_from_bytes("application/json", GLib.Bytes.new(body.encode()))
+        bs = await self._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT)
 
-        def response(session: Soup.Session, aresult: Gio.Task):
-            bs: GLib.Bytes = session.send_and_read_finish(aresult)
-            message = session.get_async_result_message(aresult)
-            assert message
-            status = message.get_status()
-            if status != Soup.Status.OK:
-                print(f"Error Posting to '{self.url}': {Soup.Status.get_phrase(status)}")
-                return
-            if published := json.loads(bs.get_data().decode()).get("published"):  # type: ignore
-                print(f"Published {published} Metric")
-
-        self._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, callback=response)
+        if (status := message.get_status()) != Soup.Status.OK:
+            print(f"Error Posting to '{self.url}': {Soup.Status.get_phrase(status)}")
+            return
+        if published := json.loads(bs.get_data().decode()).get("published"):  # type: ignore
+            print(f"Published {published} Metric")

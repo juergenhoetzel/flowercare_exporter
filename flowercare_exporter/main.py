@@ -1,10 +1,12 @@
 import argparse
+import asyncio
 import dataclasses
 import logging
 import os
 import sys
 
 import gi
+import gi.events  # type: ignore
 from gi.repository import GLib  # type: ignore
 
 from miflora.metrics import Exporter, MiFloraFirmwareBattery, MiFloraSensor
@@ -23,7 +25,7 @@ def _get_alias_mapping(args: argparse.Namespace) -> dict[str, str]:
     return dict([alias_s.split("=") for alias_s in args.alias])
 
 
-def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
+async def metrics(args: argparse.Namespace):
     metrics_received: set[str] = set()  # set of macs
     exporters: list[Exporter] = []
 
@@ -33,51 +35,54 @@ def metrics(mainloop: GLib.MainLoop, args: argparse.Namespace):
     if args.prometheus_url:
         exporters.append(PushGateway(args.prometheus_url, os.getenv("METRICS_USER"), os.getenv("METRICS_PASSWORD")))
 
-    def _sensor_received(miflora: MiFlora, sensordata: MiFloraSensor):
+    async def export_metrics(miflora: MiFlora):
+        firmwarebattery = await miflora.read_firmware_battery()
+        await asyncio.wait([asyncio.create_task(exporter.send_battery(firmwarebattery)) for exporter in exporters])
+
+        sensordata = await miflora.read_sensor()
         print(dataclasses.asdict(sensordata))
-        miflora.disconnect()  # all data received
+        await miflora.disconnect()
         metrics_received.add(miflora.address)
-        for exporter in exporters:
-            exporter.send_sensor(sensordata)
+        await asyncio.wait([asyncio.create_task(exporter.send_sensor(sensordata)) for exporter in exporters])
 
-    def _firmware_battery_received(miflora: MiFlora, firmwarebattery: MiFloraFirmwareBattery):
-        print(dataclasses.asdict(firmwarebattery))
-        miflora.read_sensor(_sensor_received)
-        for exporter in exporters:
-            exporter.send_battery(firmwarebattery)
-
-    def get_metrics(miflora: MiFlora):
-        miflora.read_firmware_battery(_firmware_battery_received)
-
-    def miflora_added(miflora: MiFlora):
-        log.debug(f"Added {miflora}")
-        if miflora.address in metrics_received:
-            log.info(f"Not connecting to {miflora.address} (metric already collected)")
-        else:
-            miflora.on_services_disovered = get_metrics
-            miflora.connect()
-
-    def quit():
-        log.info(f"Received Data from {len(metrics_received)} MiFloras")
-        mainloop.quit()
-
-    mifloramanager = MiFloraManager(_get_alias_mapping(args), miflora_added)
-    mifloramanager.setup_adapter()  # trigger events
-    mifloramanager.start_discovery()
-    GLib.timeout_add_seconds(args.timeout, quit)
+    mifloramanager = MiFloraManager(_get_alias_mapping(args))
+    await mifloramanager.setup_adapter()
+    try:
+        async with asyncio.timeout(args.timeout):
+            async for miflora in mifloramanager.scan_mifloras():
+                log.debug(f"Added {miflora}")
+                print(miflora)
+                if miflora.address in metrics_received:
+                    log.info(f"Not connecting to {miflora.address} (metric already collected)")
+                elif await miflora.connect():
+                    while not miflora._services_discovered:
+                        await asyncio.sleep(1)  # FIXME: Polling, use Condition variable?
+                        log.debug("Waiting for services")
+                    log.debug("Service discovered")
+                    await export_metrics(miflora)
+    except TimeoutError:
+        print(f"Received data from {len(metrics_received)} MiFloras!")
 
 
-def blink(mainloop: GLib.MainLoop, args: argparse.Namespace):
+async def blink(args: argparse.Namespace):
+    blinked: set[str] = set()  # set of macs
     alias_mapping = _get_alias_mapping(args)
-
-    def miflora_added(miflora: MiFlora):
-        miflora.on_services_disovered = MiFlora.blink
-        miflora.connect()
-
-    mifloramanager = MiFloraManager(
-        alias_mapping, miflora_added, lambda miflora: log.debug(f"MiFlora {miflora} removed")
-    )
-    mifloramanager.setup_adapter()  # trigger events
+    mifloramanager = MiFloraManager(_get_alias_mapping(args))
+    await mifloramanager.setup_adapter()
+    try:
+        async with asyncio.timeout(args.timeout):
+            async for miflora in mifloramanager.scan_mifloras():
+                if miflora.address in blinked:
+                    log.debug(f"Already blinked {miflora}")
+                elif await miflora.connect():
+                    while not miflora._services_discovered:
+                        await asyncio.sleep(1)  # FIXME: Polling, use Condition variable?
+                        log.debug(f"Waiting for services on {miflora}")
+                    await miflora.blink()
+                    log.debug(f"Blinked {miflora}")
+                    blinked.add(miflora.address)
+    except TimeoutError:
+        print(f"Blinked {len(blinked)} MiFloras!")
 
 
 def main():
@@ -125,14 +130,11 @@ def main():
         level=args.log_level,
         format=("%(asctime)s %(levelname)-8s %(message)s" if sys.stdout.isatty() else "%(levelname)-8s %(message)s"),
     )
-    mainloop = GLib.MainLoop()
+    policy = gi.events.GLibEventLoopPolicy()
+    mainloop = policy.get_event_loop()
 
-    match args.command:
-        case "metrics":
-            metrics(mainloop, args)
-        case "blink":
-            blink(mainloop, args)
     try:
-        mainloop.run()
+        mainloop.run_until_complete(blink(args) if args.command == "blink" else metrics(args))
+
     except KeyboardInterrupt:
-        mainloop.quit()
+        ...
