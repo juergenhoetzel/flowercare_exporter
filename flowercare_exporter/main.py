@@ -15,6 +15,7 @@ gi.require_version("Gio", "2.0")
 
 from miflora.bluez import MiFlora, MiFloraManager
 
+from .console import Console
 from .graphite import Graphite
 from .prometheus import PushGateway
 
@@ -27,7 +28,7 @@ def _get_alias_mapping(args: argparse.Namespace) -> dict[str, str]:
 
 async def metrics(args: argparse.Namespace):
     metrics_received: set[str] = set()  # set of macs
-    exporters: list[Exporter] = []
+    exporters: list[Exporter] = [Console()]
 
     if args.graphite_url:
         exporters.append(Graphite(args.graphite_url, os.getenv("METRICS_USER"), os.getenv("METRICS_PASSWORD")))
