@@ -75,6 +75,8 @@ async def blink(args: argparse.Namespace):
             async for miflora in mifloramanager.scan_mifloras():
                 if miflora.address in blinked:
                     log.debug(f"Already blinked {miflora}")
+                elif miflora.address in args.ignore:
+                    log.info(f"Ignoring {miflora}")
                 elif await miflora.connect():
                     while not miflora._services_discovered:
                         await asyncio.sleep(1)  # FIXME: Polling, use Condition variable?
@@ -118,7 +120,14 @@ def main():
         action="append",
         help="Set aliases for specified device (e.g.: C4:7C:8D:XX:YY:ZZ=Bromeliad). Can be repeated",
     )
-
+    parser.add_argument(
+        "-i",
+        "--ignore",
+        default=[],
+        type=str,
+        action="append",
+        help="Ignore MAC address matching this string. Can be repeated ",
+    )
     parser.add_argument("-t", "--timeout", type=int, default=60, help="Scan timeout in seconds")
     subparsers = parser.add_subparsers(
         title="subcommands", required=True, dest="command", description="valid subcommands", help="Operation mode"
