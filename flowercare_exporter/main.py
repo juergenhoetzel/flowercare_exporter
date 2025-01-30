@@ -55,6 +55,8 @@ async def metrics(args: argparse.Namespace):
                 print(miflora)
                 if miflora.address in metrics_received:
                     log.info(f"Not connecting to {miflora.address} (metric already collected)")
+                elif miflora.address in args.ignore:
+                    log.info(f"Ignoring {miflora}")
                 elif await miflora.connect():
                     while not miflora._services_discovered:
                         await asyncio.sleep(1)  # FIXME: Polling, use Condition variable?
