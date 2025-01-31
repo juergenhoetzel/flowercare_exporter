@@ -58,14 +58,14 @@ class PushGateway:
 
     async def send_sensor(self, sensordata: MiFloraSensor):
         body = _sensor_to_prometheus(sensordata)
-        await self._send_message(body)
+        await self._send_message(body, sensordata.address)
 
     async def send_battery(self, fb: MiFloraFirmwareBattery):
         body = _firmware_battery_to_prometheus(fb)
-        await self._send_message(body)
+        await self._send_message(body, fb.address)
 
-    async def _send_message(self, body: str):
-        uri = GLib.Uri.parse(self.url, GLib.UriFlags.NONE)
+    async def _send_message(self, body: str, grouping_value: str):
+        uri = GLib.Uri.parse(f"{self.url}/address/{grouping_value}", GLib.UriFlags.NONE)
         message = Soup.Message.new_from_uri("POST", uri)
         if self.user and self.password:
             assert self._session
@@ -81,4 +81,4 @@ class PushGateway:
 
         status = message.get_status()
         if status != Soup.Status.OK:
-            log.error(f"Error Posting to '{self.url}': {Soup.Status.get_phrase(status)} -> {result.get_data()}")
+            log.error(f"Error Posting to '{uri}': {Soup.Status.get_phrase(status)} -> {result.get_data()}")
