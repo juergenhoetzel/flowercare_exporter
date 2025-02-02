@@ -52,24 +52,25 @@ async def metrics(args: argparse.Namespace):
         async with asyncio.timeout(args.timeout):
             async for miflora in mifloramanager.scan_mifloras():
                 log.debug(f"Added {miflora}")
-                print(miflora)
                 if miflora.address in metrics_received:
                     log.info(f"Not connecting to {miflora.address} (metric already collected)")
-                elif miflora.address in args.ignore:
-                    log.info(f"Ignoring {miflora}")
+                elif args.only_alias and miflora.address not in mifloramanager.alias_mapping:
+                    log.info(f"Not connecting to {miflora.address} (only connecting to aliased devices)")
                 elif await miflora.connect():
                     while not miflora._services_discovered:
                         await asyncio.sleep(1)  # FIXME: Polling, use Condition variable?
                         log.debug("Waiting for services")
                     log.debug("Service discovered")
                     await export_metrics(miflora)
+                    if args.only_alias and len(metrics_received) == len(mifloramanager.alias_mapping):
+                        log.info("All metrics received")
+                        return
     except TimeoutError:
-        print(f"Received data from {len(metrics_received)} MiFloras!")
+        log.info(f"Received data from {len(metrics_received)} MiFloras!")
 
 
 async def blink(args: argparse.Namespace):
     blinked: set[str] = set()  # set of macs
-    alias_mapping = _get_alias_mapping(args)
     mifloramanager = MiFloraManager(_get_alias_mapping(args))
     await mifloramanager.setup_adapter()
     try:
@@ -77,8 +78,8 @@ async def blink(args: argparse.Namespace):
             async for miflora in mifloramanager.scan_mifloras():
                 if miflora.address in blinked:
                     log.debug(f"Already blinked {miflora}")
-                elif miflora.address in args.ignore:
-                    log.info(f"Ignoring {miflora}")
+                elif args.only_alias and miflora.address not in mifloramanager.alias_mapping:
+                    log.info(f"Not connecting to {miflora.address} (only connecting to aliased devices)")
                 elif await miflora.connect():
                     while not miflora._services_discovered:
                         await asyncio.sleep(1)  # FIXME: Polling, use Condition variable?
@@ -86,6 +87,9 @@ async def blink(args: argparse.Namespace):
                     await miflora.blink()
                     log.debug(f"Blinked {miflora}")
                     blinked.add(miflora.address)
+                    if args.only_alias and len(blinked) == len(mifloramanager.alias_mapping):
+                        log.info("All devices blinked")
+                        return
     except TimeoutError:
         print(f"Blinked {len(blinked)} MiFloras!")
 
@@ -131,6 +135,14 @@ def main():
         help="Ignore MAC address matching this string. Can be repeated ",
     )
     parser.add_argument("-t", "--timeout", type=int, default=60, help="Scan timeout in seconds")
+    parser.add_argument(
+        "-o",
+        "--only-alias",
+        type=bool,
+        default=False,
+        help="Only connect to aliases devices (if not provided, set to False)",
+    )
+
     subparsers = parser.add_subparsers(
         title="subcommands", required=True, dest="command", description="valid subcommands", help="Operation mode"
     )
